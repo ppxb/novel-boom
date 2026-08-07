@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+.DS_Store
+config.toml
+downloads/
+*.log
+.idea/
+.vscode/

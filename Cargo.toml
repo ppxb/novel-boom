@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/novel-boom-core",
+    "crates/novel-boom-tui",
+]
+default-members = ["."]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/example/novel-boom"
+rust-version = "1.85"
+
+[workspace.dependencies]
+novel-boom-core = { path = "crates/novel-boom-core" }
+novel-boom-tui = { path = "crates/novel-boom-tui" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[package]
+name = "novel-boom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Novel downloader with TUI — Rust rewrite inspired by so-novel"
+readme = "README.md"
+
+[[bin]]
+name = "novel-boom"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+novel-boom-core.workspace = true
+novel-boom-tui.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
