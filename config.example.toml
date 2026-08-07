@@ -43,6 +43,7 @@ retry_min_interval_ms = 2000
 retry_max_interval_ms = 4000
 
 [proxy]
+# 部分书源对 IP / 跨境访问有要求；连接超时或无法连接时可尝试开启本地代理
 enabled = false
 host = "127.0.0.1"
 port = 7890

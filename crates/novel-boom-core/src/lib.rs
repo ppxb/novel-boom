@@ -6,15 +6,18 @@
 //! - [`config`] — TOML application settings
 //! - [`model`] — pure domain types
 //! - [`rule`] — book source packs (so-novel JSON)
+//! - [`net`] — HTTP client
+//! - [`service`] — use-cases (search, …)
 //! - [`Error`] / [`Result`]
-//!
-//! Crawl, parse, export, and use-case services will land in later milestones
-//! without changing this boundary idea.
 
 pub mod config;
 pub mod error;
+pub mod extract;
 pub mod model;
+pub mod net;
+pub mod parse;
 pub mod rule;
+pub mod service;
 
 pub use error::{Error, Result};
 

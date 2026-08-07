@@ -11,4 +11,5 @@ anyhow = { workspace = true }
 crossterm = { workspace = true }
 novel-boom-core = { workspace = true }
 ratatui = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }

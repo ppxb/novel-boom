@@ -70,12 +70,14 @@ Book sources remain **JSON** under `rules/` (compatible with so-novel rule packs
 界面文案为**中文**。
 
 - 主菜单：`↑/↓` 或 `j/k` 移动，`Enter` 确认，`q` 退出
+- **独立搜索**：选书源 → 输入关键词 → 结果列表（CSS 规则；暂不支持 `@js:` / XPath）
 - **书源一览**：读取 `rules/` 下激活规则包，表格浏览
 - **配置信息**：只读展示 TOML 配置
-- 聚合搜索 / 独立搜索 / 批量下载：占位（后续里程碑）
+- 聚合搜索 / 批量下载：占位（后续里程碑）
 
 ```bash
-cargo run -- --print-sources   # 命令行打印书源列表
+cargo run -- --print-sources
+cargo run -- --search "诡秘之主" --source-id 1
 ```
 
 ## Roadmap (short)

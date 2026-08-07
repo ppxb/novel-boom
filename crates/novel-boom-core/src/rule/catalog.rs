@@ -55,6 +55,20 @@ impl RuleCatalog {
         self.rules.iter().map(SourceInfo::from).collect()
     }
 
+    /// Sources that can be used for keyword search.
+    pub fn searchable_sources(&self) -> Vec<SourceInfo> {
+        self.rules
+            .iter()
+            .filter(|r| r.is_searchable())
+            .map(SourceInfo::from)
+            .collect()
+    }
+
+    /// Look up a rule by 1-based id.
+    pub fn get(&self, source_id: u32) -> Option<&Rule> {
+        self.rules.iter().find(|r| r.id == source_id)
+    }
+
     pub fn len(&self) -> usize {
         self.rules.len()
     }

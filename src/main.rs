@@ -1,14 +1,17 @@
 //! novel-boom 程序入口。
 //!
-//! 职责尽量薄：解析参数 → 加载配置/书源 → 交给 TUI。
+//! 职责尽量薄：解析参数 → 加载配置/书源 → 交给 TUI 或 CLI 搜索。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
 use novel_boom_core::config::{self, Config};
+use novel_boom_core::net::HttpClient;
 use novel_boom_core::rule::RuleCatalog;
+use novel_boom_core::service;
 use novel_boom_tui::TuiOptions;
+use tokio::runtime::Runtime;
 use tracing_subscriber::EnvFilter;
 
 /// 带终端界面的网络小说下载器。
@@ -31,6 +34,14 @@ struct Cli {
     /// 打印当前激活书源列表并退出
     #[arg(long)]
     print_sources: bool,
+
+    /// 命令行独立搜索关键词（不进入 TUI）
+    #[arg(long, value_name = "KEYWORD")]
+    search: Option<String>,
+
+    /// 独立搜索使用的书源 ID（配合 --search；默认读配置 source_id）
+    #[arg(long, value_name = "ID")]
+    source_id: Option<u32>,
 }
 
 fn main() -> ExitCode {
@@ -39,13 +50,17 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let path = config::resolve_config_path(cli.config.as_deref());
 
-    let cfg = match config::load_or_default(&path) {
+    let mut cfg = match config::load_or_default(&path) {
         Ok(cfg) => cfg,
         Err(err) => {
             eprintln!("错误：无法加载配置 {}：{err}", path.display());
             return ExitCode::FAILURE;
         }
     };
+
+    if let Some(id) = cli.source_id {
+        cfg.source.source_id = id;
+    }
 
     if cli.print_config {
         return match print_config(&cfg) {
@@ -57,40 +72,56 @@ fn main() -> ExitCode {
         };
     }
 
-    let catalog_result = RuleCatalog::load(&cfg, Some(&path));
+    let catalog = match RuleCatalog::load(&cfg, Some(&path)) {
+        Ok(catalog) => catalog,
+        Err(err) => {
+            if cli.print_sources || cli.search.is_some() {
+                eprintln!("错误：无法加载书源：{err}");
+                return ExitCode::FAILURE;
+            }
+            tracing::warn!(error = %err, "书源规则加载失败，界面仍可启动");
+            return run_tui(cfg, None, Some(err.to_string()));
+        }
+    };
 
     if cli.print_sources {
-        return match catalog_result {
-            Ok(catalog) => {
-                print_sources(&catalog);
-                ExitCode::SUCCESS
-            }
-            Err(err) => {
-                eprintln!("错误：无法加载书源：{err}");
-                ExitCode::FAILURE
-            }
-        };
+        print_sources(&catalog);
+        return ExitCode::SUCCESS;
     }
 
-    let (catalog, rules_error) = match catalog_result {
-        Ok(catalog) => {
-            tracing::info!(
-                path = %catalog.path.display(),
-                count = catalog.len(),
-                searchable = catalog.searchable_count(),
-                "书源规则已加载"
-            );
-            (Some(catalog), None)
-        }
+    if let Some(keyword) = cli.search.as_deref() {
+        return run_cli_search(&cfg, &catalog, keyword);
+    }
+
+    tracing::info!(
+        path = %catalog.path.display(),
+        count = catalog.len(),
+        searchable = catalog.searchable_count(),
+        "书源规则已加载"
+    );
+
+    run_tui(cfg, Some(catalog), None)
+}
+
+fn run_tui(cfg: Config, catalog: Option<RuleCatalog>, rules_error: Option<String>) -> ExitCode {
+    let http = match HttpClient::from_config(&cfg) {
+        Ok(http) => http,
         Err(err) => {
-            tracing::warn!(error = %err, "书源规则加载失败，界面仍可启动");
-            (None, Some(err.to_string()))
+            eprintln!("错误：创建 HTTP 客户端失败：{err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let runtime = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("错误：创建异步运行时失败：{err}");
+            return ExitCode::FAILURE;
         }
     };
 
     tracing::info!(
         version = novel_boom_core::VERSION,
-        config = %path.display(),
         rules = %cfg.source.active_rules,
         "启动终端界面"
     );
@@ -99,6 +130,8 @@ fn main() -> ExitCode {
         config: cfg,
         catalog,
         rules_error,
+        http,
+        runtime,
     };
 
     if let Err(err) = novel_boom_tui::run(options) {
@@ -107,6 +140,59 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn run_cli_search(cfg: &Config, catalog: &RuleCatalog, keyword: &str) -> ExitCode {
+    let source_id = cfg.source.source_id;
+    if source_id == 0 {
+        eprintln!("错误：请通过 --source-id 或配置 [source].source_id 指定书源");
+        return ExitCode::FAILURE;
+    }
+
+    let http = match HttpClient::from_config(cfg) {
+        Ok(http) => http,
+        Err(err) => {
+            eprintln!("错误：创建 HTTP 客户端失败：{err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let runtime = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("错误：创建异步运行时失败：{err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("正在搜索：书源 {source_id} · 关键词「{keyword}」…");
+
+    match runtime.block_on(service::single_search(
+        &http, catalog, cfg, source_id, keyword,
+    )) {
+        Ok(hits) => {
+            if hits.is_empty() {
+                println!("无结果");
+                return ExitCode::SUCCESS;
+            }
+            println!("共 {} 条：", hits.len());
+            for (idx, hit) in hits.iter().enumerate() {
+                println!(
+                    "{:>3}. {} · {} · {} · {}",
+                    idx + 1,
+                    hit.book_name,
+                    empty_dash(&hit.author),
+                    empty_dash(&hit.latest_chapter),
+                    hit.url
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("错误：搜索失败：{err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn init_tracing() {
@@ -156,4 +242,8 @@ fn truncate_display(input: &str, max_chars: usize) -> String {
     let mut s: String = input.chars().take(max_chars.saturating_sub(1)).collect();
     s.push('…');
     s
+}
+
+fn empty_dash(value: &str) -> &str {
+    if value.is_empty() { "—" } else { value }
 }
