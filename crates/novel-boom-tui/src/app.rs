@@ -10,24 +10,22 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use novel_boom_core::config::Config;
-use novel_boom_core::model::SearchHit;
+use novel_boom_core::model::{Chapter, ChapterRange, SearchHit};
 use novel_boom_core::net::HttpClient;
 use novel_boom_core::rule::{RuleCatalog, SourceInfo};
-use novel_boom_core::service;
+use novel_boom_core::service::{self, BookCatalog};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::{ListState, TableState};
 use tokio::runtime::Runtime;
 
-use crate::screen::Screen;
+use crate::screen::{RangeInputMode, Screen};
 use crate::ui::{self, UiModel};
 
 /// TUI 启动参数。
 pub struct TuiOptions {
     pub config: Config,
-    /// 成功加载的书源目录；失败时为 `None`，界面展示错误信息。
     pub catalog: Option<RuleCatalog>,
-    /// 加载失败时的说明（中文）。
     pub rules_error: Option<String>,
     pub http: HttpClient,
     pub runtime: Runtime,
@@ -37,9 +35,7 @@ pub struct TuiOptions {
 pub fn run(options: TuiOptions) -> anyhow::Result<()> {
     let mut terminal = setup_terminal().context("初始化终端失败")?;
     let mut app = App::new(options);
-
     let result = app_loop(&mut terminal, &mut app);
-
     restore_terminal(&mut terminal).context("恢复终端失败")?;
     result
 }
@@ -59,11 +55,16 @@ struct App {
     source_state: TableState,
     search_pick_state: TableState,
     search_result_state: TableState,
+    toc_state: TableState,
     sources: Vec<SourceInfo>,
     searchable_sources: Vec<SourceInfo>,
     search_input: String,
+    range_input: String,
     search_hits: Vec<SearchHit>,
-    searching: bool,
+    book_catalog: Option<BookCatalog>,
+    selected_chapters: Vec<Chapter>,
+    busy: bool,
+    busy_message: String,
     rules_path: String,
     rules_error: Option<String>,
     should_quit: bool,
@@ -74,7 +75,6 @@ impl App {
     fn new(options: TuiOptions) -> Self {
         let mut menu_state = ListState::default();
         menu_state.select(Some(0));
-
         let mut source_state = TableState::default();
         let mut search_pick_state = TableState::default();
 
@@ -115,11 +115,16 @@ impl App {
             source_state,
             search_pick_state,
             search_result_state: TableState::default(),
+            toc_state: TableState::default(),
             sources,
             searchable_sources,
             search_input: String::new(),
+            range_input: String::new(),
             search_hits: Vec::new(),
-            searching: false,
+            book_catalog: None,
+            selected_chapters: Vec::new(),
+            busy: false,
+            busy_message: String::new(),
             rules_path,
             rules_error: options.rules_error,
             should_quit: false,
@@ -132,7 +137,7 @@ impl App {
         key: KeyEvent,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> anyhow::Result<()> {
-        if key.kind != KeyEventKind::Press || self.searching {
+        if key.kind != KeyEventKind::Press || self.busy {
             return Ok(());
         }
 
@@ -146,7 +151,10 @@ impl App {
             Screen::Sources => self.on_sources_key(key),
             Screen::SingleSearchPickSource => self.on_search_pick_key(key),
             Screen::SingleSearchInput { .. } => self.on_search_input_key(key, terminal)?,
-            Screen::SingleSearchResults { .. } => self.on_search_results_key(key),
+            Screen::SingleSearchResults { .. } => self.on_search_results_key(key, terminal)?,
+            Screen::BookToc { .. } => self.on_book_toc_key(key),
+            Screen::BookRangeInput { .. } => self.on_range_input_key(key),
+            Screen::DownloadPlan { .. } => self.on_download_plan_key(key),
         }
         Ok(())
     }
@@ -242,7 +250,11 @@ impl App {
         Ok(())
     }
 
-    fn on_search_results_key(&mut self, key: KeyEvent) {
+    fn on_search_results_key(
+        &mut self,
+        key: KeyEvent,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.back_home("已返回主菜单"),
             KeyCode::Char('r') => {
@@ -263,7 +275,83 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 move_table_sel(&mut self.search_result_state, self.search_hits.len(), 1);
             }
+            KeyCode::Enter => self.open_selected_book(terminal)?,
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn on_book_toc_key(&mut self, key: KeyEvent) {
+        let toc_len = self
+            .book_catalog
+            .as_ref()
+            .map(|c| c.chapters.len())
+            .unwrap_or(0);
+
+        match key.code {
+            KeyCode::Esc => self.back_to_search_results(),
+            KeyCode::Up | KeyCode::Char('k') => move_table_sel(&mut self.toc_state, toc_len, -1),
+            KeyCode::Down | KeyCode::Char('j') => move_table_sel(&mut self.toc_state, toc_len, 1),
+            KeyCode::Char('1') => {
+                let _ = self.apply_range(ChapterRange::All, "全本".into());
+            }
+            KeyCode::Char('2') => self.open_range_input(RangeInputMode::Span),
+            KeyCode::Char('3') => self.open_range_input(RangeInputMode::Latest),
+            _ => {}
+        }
+    }
+
+    fn on_range_input_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                if let Screen::BookRangeInput {
+                    source_id,
+                    source_name,
+                    keyword,
+                    ..
+                } = &self.screen
+                {
+                    self.screen = Screen::BookToc {
+                        source_id: *source_id,
+                        source_name: source_name.clone(),
+                        keyword: keyword.clone(),
+                    };
+                    self.status = "已返回目录".into();
+                }
+            }
+            KeyCode::Enter => self.confirm_range_input(),
+            KeyCode::Backspace => {
+                self.range_input.pop();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.range_input.clear();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.range_input.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_download_plan_key(&mut self, key: KeyEvent) {
+        if matches!(
+            key.code,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')
+        ) {
+            if let Screen::DownloadPlan {
+                source_id,
+                source_name,
+                keyword,
+                ..
+            } = &self.screen
+            {
+                self.screen = Screen::BookToc {
+                    source_id: *source_id,
+                    source_name: source_name.clone(),
+                    keyword: keyword.clone(),
+                };
+                self.status = "已返回目录，可重新选择范围".into();
+            }
         }
     }
 
@@ -311,7 +399,6 @@ impl App {
             return;
         }
 
-        // 配置里指定了 source_id 时，直接进入输入页。
         if self.config.source.source_id > 0 {
             if let Some(source) = self
                 .searchable_sources
@@ -341,6 +428,8 @@ impl App {
     fn open_search_input(&mut self, source_id: u32, source_name: String) {
         self.search_input.clear();
         self.search_hits.clear();
+        self.book_catalog = None;
+        self.selected_chapters.clear();
         self.search_result_state.select(None);
         self.status = format!("已选择 [{source_id}] {source_name}，请输入关键词");
         self.screen = Screen::SingleSearchInput {
@@ -367,25 +456,22 @@ impl App {
             self.status = "关键词不能为空".into();
             return Ok(());
         }
-
-        let Some(catalog) = self.catalog.as_ref() else {
+        let Some(catalog) = self.catalog.clone() else {
             self.status = "书源未加载".into();
             return Ok(());
         };
 
-        self.searching = true;
-        self.status = format!("正在搜索「{keyword}」…");
+        self.set_busy(true, format!("正在搜索「{keyword}」…"));
         redraw(terminal, self)?;
 
         let result = self.runtime.block_on(service::single_search(
             &self.http,
-            catalog,
+            &catalog,
             &self.config,
             source_id,
             &keyword,
         ));
-
-        self.searching = false;
+        self.set_busy(false, String::new());
 
         match result {
             Ok(hits) => {
@@ -402,19 +488,216 @@ impl App {
                     keyword: keyword.clone(),
                 };
                 self.status = format!(
-                    "搜索完成 — [{source_id}] {source_name} · 「{keyword}」· {count} 条 · r 重搜"
+                    "搜索完成 — [{source_id}] {source_name} · 「{keyword}」· {count} 条 · Enter 打开"
                 );
             }
-            Err(err) => {
-                self.status = format!("搜索失败：{err}");
-            }
+            Err(err) => self.status = format!("搜索失败：{err}"),
         }
         Ok(())
+    }
+
+    fn open_selected_book(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
+        let Screen::SingleSearchResults {
+            source_id,
+            source_name,
+            keyword,
+        } = &self.screen
+        else {
+            return Ok(());
+        };
+        let source_id = *source_id;
+        let source_name = source_name.clone();
+        let keyword = keyword.clone();
+
+        let Some(hit) = self
+            .search_result_state
+            .selected()
+            .and_then(|i| self.search_hits.get(i))
+            .cloned()
+        else {
+            self.status = "请先选择一条搜索结果".into();
+            return Ok(());
+        };
+        let Some(catalog) = self.catalog.clone() else {
+            self.status = "书源未加载".into();
+            return Ok(());
+        };
+
+        self.set_busy(
+            true,
+            format!("正在解析《{}》详情与目录…", hit.book_name),
+        );
+        redraw(terminal, self)?;
+
+        let result = self.runtime.block_on(service::fetch_book_catalog(
+            &self.http,
+            &catalog,
+            &self.config,
+            source_id,
+            &hit.url,
+        ));
+        self.set_busy(false, String::new());
+
+        match result {
+            Ok(book_catalog) => {
+                let count = book_catalog.chapters.len();
+                self.toc_state
+                    .select(if count > 0 { Some(0) } else { None });
+                self.selected_chapters.clear();
+                self.book_catalog = Some(book_catalog);
+                self.screen = Screen::BookToc {
+                    source_id,
+                    source_name: source_name.clone(),
+                    keyword,
+                };
+                self.status = format!(
+                    "目录已加载 — 《{}》共 {count} 章 · 1 全本 / 2 范围 / 3 最新",
+                    self.book_catalog
+                        .as_ref()
+                        .map(|c| c.book.name.as_str())
+                        .unwrap_or("?")
+                );
+            }
+            Err(err) => self.status = format!("打开书籍失败：{err}"),
+        }
+        Ok(())
+    }
+
+    fn open_range_input(&mut self, mode: RangeInputMode) {
+        let Screen::BookToc {
+            source_id,
+            source_name,
+            keyword,
+        } = &self.screen
+        else {
+            return;
+        };
+        self.range_input.clear();
+        self.screen = Screen::BookRangeInput {
+            source_id: *source_id,
+            source_name: source_name.clone(),
+            keyword: keyword.clone(),
+            mode,
+        };
+        self.status = match mode {
+            RangeInputMode::Span => "请输入起始章与结束章，例如：1 50".into(),
+            RangeInputMode::Latest => "请输入最新章节数量，例如：20".into(),
+        };
+    }
+
+    fn confirm_range_input(&mut self) {
+        let Screen::BookRangeInput { mode, .. } = &self.screen else {
+            return;
+        };
+        let mode = *mode;
+        let raw = self.range_input.trim().to_string();
+        if raw.is_empty() {
+            self.status = "输入不能为空".into();
+            return;
+        }
+
+        let range = match mode {
+            RangeInputMode::Span => {
+                let parts: Vec<_> = raw.split_whitespace().collect();
+                if parts.len() != 2 {
+                    self.status = "格式错误：请输入两个数字，例如 1 50".into();
+                    return;
+                }
+                let Ok(start) = parts[0].parse::<u32>() else {
+                    self.status = "起始章不是有效数字".into();
+                    return;
+                };
+                let Ok(end) = parts[1].parse::<u32>() else {
+                    self.status = "结束章不是有效数字".into();
+                    return;
+                };
+                ChapterRange::Span { start, end }
+            }
+            RangeInputMode::Latest => {
+                let Ok(count) = raw.parse::<u32>() else {
+                    self.status = "数量不是有效数字".into();
+                    return;
+                };
+                ChapterRange::Latest { count }
+            }
+        };
+
+        let label = match range {
+            ChapterRange::All => "全本".into(),
+            ChapterRange::Span { start, end } => format!("第 {start}-{end} 章"),
+            ChapterRange::Latest { count } => format!("最新 {count} 章"),
+        };
+        let _ = self.apply_range(range, label);
+    }
+
+    fn apply_range(&mut self, range: ChapterRange, label: String) -> bool {
+        let Some(catalog) = self.book_catalog.as_ref() else {
+            self.status = "目录未加载".into();
+            return false;
+        };
+        match service::select_chapters(&catalog.chapters, range) {
+            Ok(selected) => {
+                let count = selected.len();
+                self.selected_chapters = selected;
+                if let Screen::BookToc {
+                    source_id,
+                    source_name,
+                    keyword,
+                }
+                | Screen::BookRangeInput {
+                    source_id,
+                    source_name,
+                    keyword,
+                    ..
+                } = &self.screen
+                {
+                    self.screen = Screen::DownloadPlan {
+                        source_id: *source_id,
+                        source_name: source_name.clone(),
+                        keyword: keyword.clone(),
+                        range_label: label.clone(),
+                    };
+                }
+                self.status = format!("已选定 {count} 章（{label}）· 下载功能即将推出");
+                true
+            }
+            Err(err) => {
+                self.status = format!("范围无效：{err}");
+                false
+            }
+        }
+    }
+
+    fn back_to_search_results(&mut self) {
+        if let Screen::BookToc {
+            source_id,
+            source_name,
+            keyword,
+        } = &self.screen
+        {
+            self.screen = Screen::SingleSearchResults {
+                source_id: *source_id,
+                source_name: source_name.clone(),
+                keyword: keyword.clone(),
+            };
+            self.status = "已返回搜索结果".into();
+        }
     }
 
     fn back_home(&mut self, status: &str) {
         self.screen = Screen::Home;
         self.status = status.into();
+    }
+
+    fn set_busy(&mut self, busy: bool, message: String) {
+        self.busy = busy;
+        self.busy_message = message;
+        if busy {
+            self.status = self.busy_message.clone();
+        }
     }
 
     fn ui_model(&self) -> UiModel<'_> {
@@ -429,7 +712,17 @@ impl App {
             search_result_state: &self.search_result_state,
             search_hits: &self.search_hits,
             search_input: &self.search_input,
-            searching: self.searching,
+            range_input: &self.range_input,
+            book: self.book_catalog.as_ref().map(|c| &c.book),
+            toc_chapters: self
+                .book_catalog
+                .as_ref()
+                .map(|c| c.chapters.as_slice())
+                .unwrap_or(&[]),
+            selected_chapters: &self.selected_chapters,
+            toc_state: &self.toc_state,
+            busy: self.busy,
+            busy_message: &self.busy_message,
             rules_path: &self.rules_path,
             rules_error: self.rules_error.as_deref(),
             status: &self.status,
@@ -452,7 +745,6 @@ fn app_loop(
 ) -> anyhow::Result<()> {
     while !app.should_quit {
         redraw(terminal, app)?;
-
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 app.on_key(key, terminal)?;

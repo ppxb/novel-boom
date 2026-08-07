@@ -1,7 +1,7 @@
 //! 界面绘制（纯展示，无业务逻辑）。
 
 use novel_boom_core::config::Config;
-use novel_boom_core::model::SearchHit;
+use novel_boom_core::model::{Book, Chapter, SearchHit};
 use novel_boom_core::rule::SourceInfo;
 use novel_boom_core::VERSION;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -13,7 +13,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::screen::Screen;
+use crate::screen::{RangeInputMode, Screen};
 
 /// 绘制时只读的应用快照。
 pub struct UiModel<'a> {
@@ -27,7 +27,13 @@ pub struct UiModel<'a> {
     pub search_result_state: &'a TableState,
     pub search_hits: &'a [SearchHit],
     pub search_input: &'a str,
-    pub searching: bool,
+    pub range_input: &'a str,
+    pub book: Option<&'a Book>,
+    pub toc_chapters: &'a [Chapter],
+    pub selected_chapters: &'a [Chapter],
+    pub toc_state: &'a TableState,
+    pub busy: bool,
+    pub busy_message: &'a str,
     pub rules_path: &'a str,
     pub rules_error: Option<&'a str>,
     pub status: &'a str,
@@ -71,12 +77,17 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiModel<'_>) {
             source_name,
             keyword,
         } => draw_search_results(frame, chunks[1], model, *source_id, source_name, keyword),
+        Screen::BookToc { .. } => draw_book_toc(frame, chunks[1], model),
+        Screen::BookRangeInput { mode, .. } => draw_range_input(frame, chunks[1], model, *mode),
+        Screen::DownloadPlan { range_label, .. } => {
+            draw_download_plan(frame, chunks[1], model, range_label);
+        }
         Screen::Placeholder(title) => draw_placeholder(frame, chunks[1], title),
     }
     draw_status(frame, chunks[2], model);
 
-    if model.searching {
-        draw_searching_overlay(frame, area);
+    if model.busy {
+        draw_busy_overlay(frame, area, model.busy_message);
     }
 }
 
@@ -482,7 +493,7 @@ fn draw_search_results(
             model.search_hits.len()
         )),
         Line::from(Span::styled(
-            "↑/↓ 浏览 · r 重新输入关键词 · Esc 返回主菜单",
+            "↑/↓ 浏览 · Enter 打开目录 · r 重搜 · Esc 返回",
             Style::default().fg(Color::DarkGray),
         )),
     ])
@@ -565,19 +576,197 @@ fn draw_search_results(
     frame.render_widget(paragraph, chunks[2]);
 }
 
-fn draw_searching_overlay(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered_rect(50, 20, area);
+fn draw_book_toc(frame: &mut Frame<'_>, area: Rect, model: &UiModel<'_>) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Min(5),
+            Constraint::Length(4),
+        ])
+        .split(area);
+
+    let book_lines = match model.book {
+        Some(book) => vec![
+            Line::from(Span::styled(
+                format!("《{}》", book.name),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            kv_line("作者", empty_as_dash(&book.author)),
+            kv_line("分类", empty_as_dash(&book.category)),
+            kv_line("状态", empty_as_dash(&book.status)),
+            kv_line(
+                "目录",
+                format!("{} 章 · {}", model.toc_chapters.len(), book.url),
+            ),
+        ],
+        None => vec![Line::from("未加载书籍信息")],
+    };
+    frame.render_widget(
+        Paragraph::new(book_lines)
+            .block(Block::default().borders(Borders::ALL).title("书籍信息"))
+            .wrap(Wrap { trim: true }),
+        chunks[0],
+    );
+
+    let header = Row::new(vec!["#", "章节标题"])
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    let rows = model.toc_chapters.iter().map(|ch| {
+        Row::new(vec![
+            Cell::from(ch.order.to_string()),
+            Cell::from(ch.title.clone()),
+        ])
+    });
+    let table = Table::new(rows, [Constraint::Length(6), Constraint::Min(20)])
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("目录（共 {} 章）", model.toc_chapters.len())),
+        )
+        .row_highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+    let mut state = model.toc_state.clone();
+    frame.render_stateful_widget(table, chunks[1], &mut state);
+
+    let help = Paragraph::new(vec![
+        Line::from("1 下载全本 · 2 指定范围 · 3 最新 N 章 · Esc 返回搜索结果"),
+        Line::from(Span::styled(
+            "当前仅完成选章；章节正文下载将在下一步实现。",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("下载方式"));
+    frame.render_widget(help, chunks[2]);
+}
+
+fn draw_range_input(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &UiModel<'_>,
+    mode: RangeInputMode,
+) {
+    let (title, tip) = match mode {
+        RangeInputMode::Span => (
+            "指定章节范围",
+            "输入起始章与结束章，用空格分隔，例如：1 50（章号从 1 开始）",
+        ),
+        RangeInputMode::Latest => ("下载最新章节", "输入要下载的最新章节数量，例如：20"),
+    };
+
+    let total = model.toc_chapters.len();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Min(3),
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("当前目录共 {total} 章")),
+            Line::from(tip),
+        ])
+        .block(Block::default().borders(Borders::ALL).title("说明")),
+        chunks[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(format!("» {}_", model.range_input)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("输入")
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        chunks[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new("Enter 确认 · Esc 返回目录 · Ctrl+u 清空")
+            .block(Block::default().borders(Borders::ALL).title("操作")),
+        chunks[2],
+    );
+}
+
+fn draw_download_plan(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &UiModel<'_>,
+    range_label: &str,
+) {
+    let book_name = model
+        .book
+        .map(|b| format!("《{}》", b.name))
+        .unwrap_or_else(|| "未知书籍".into());
+    let author = model
+        .book
+        .map(|b| b.author.clone())
+        .unwrap_or_default();
+
+    let first = model.selected_chapters.first().map(|c| c.title.as_str());
+    let last = model.selected_chapters.last().map(|c| c.title.as_str());
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "章节已选定",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        kv_line("书名", book_name),
+        kv_line("作者", empty_as_dash(&author)),
+        kv_line("范围", range_label.to_string()),
+        kv_line("章数", model.selected_chapters.len().to_string()),
+        kv_line("起始", first.unwrap_or("—").to_string()),
+        kv_line("结束", last.unwrap_or("—").to_string()),
+        Line::from(""),
+        Line::from(Span::styled(
+            "正文下载与导出尚未实现。按 Enter / Esc 返回目录。",
+            Style::default().fg(Color::Yellow),
+        )),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("下载计划"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn draw_busy_overlay(frame: &mut Frame<'_>, area: Rect, message: &str) {
+    let popup = centered_rect(54, 22, area);
     frame.render_widget(Clear, popup);
     let paragraph = Paragraph::new(vec![
         Line::from(""),
         Line::from(Span::styled(
-            "正在搜索，请稍候…",
+            message.to_string(),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("网络请求进行中"),
+        Line::from("网络请求进行中，请稍候…"),
     ])
     .alignment(ratatui::layout::Alignment::Center)
     .block(

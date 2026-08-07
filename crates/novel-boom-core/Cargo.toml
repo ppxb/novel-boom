@@ -8,6 +8,7 @@ description = "Business core for novel-boom (config, rules, crawl, export)"
 
 [dependencies]
 percent-encoding = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true }
 scraper = { workspace = true }
 serde = { workspace = true }

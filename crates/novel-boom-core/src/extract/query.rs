@@ -8,6 +8,7 @@ pub enum ContentKind {
     AttrHref,
     AttrSrc,
     AttrContent,
+    AttrValue,
 }
 
 /// True when the rule field embeds `@js:` transforms.
@@ -52,6 +53,8 @@ pub fn content_kind(query: &str) -> ContentKind {
         ContentKind::AttrHref
     } else if query.contains("@src") {
         ContentKind::AttrSrc
+    } else if query.contains("@value") {
+        ContentKind::AttrValue
     } else if query.trim_start().starts_with("meta[") {
         ContentKind::AttrContent
     } else {

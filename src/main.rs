@@ -39,7 +39,11 @@ struct Cli {
     #[arg(long, value_name = "KEYWORD")]
     search: Option<String>,
 
-    /// 独立搜索使用的书源 ID（配合 --search；默认读配置 source_id）
+    /// 命令行解析书籍目录（详情页 URL，不进入 TUI）
+    #[arg(long, value_name = "URL")]
+    toc: Option<String>,
+
+    /// 书源 ID（配合 --search / --toc；默认读配置 source_id）
     #[arg(long, value_name = "ID")]
     source_id: Option<u32>,
 }
@@ -75,7 +79,7 @@ fn main() -> ExitCode {
     let catalog = match RuleCatalog::load(&cfg, Some(&path)) {
         Ok(catalog) => catalog,
         Err(err) => {
-            if cli.print_sources || cli.search.is_some() {
+            if cli.print_sources || cli.search.is_some() || cli.toc.is_some() {
                 eprintln!("错误：无法加载书源：{err}");
                 return ExitCode::FAILURE;
             }
@@ -91,6 +95,10 @@ fn main() -> ExitCode {
 
     if let Some(keyword) = cli.search.as_deref() {
         return run_cli_search(&cfg, &catalog, keyword);
+    }
+
+    if let Some(url) = cli.toc.as_deref() {
+        return run_cli_toc(&cfg, &catalog, url);
     }
 
     tracing::info!(
@@ -140,6 +148,55 @@ fn run_tui(cfg: Config, catalog: Option<RuleCatalog>, rules_error: Option<String
     }
 
     ExitCode::SUCCESS
+}
+
+fn run_cli_toc(cfg: &Config, catalog: &RuleCatalog, url: &str) -> ExitCode {
+    let source_id = cfg.source.source_id;
+    if source_id == 0 {
+        eprintln!("错误：请通过 --source-id 或配置 [source].source_id 指定书源");
+        return ExitCode::FAILURE;
+    }
+
+    let http = match HttpClient::from_config(cfg) {
+        Ok(http) => http,
+        Err(err) => {
+            eprintln!("错误：创建 HTTP 客户端失败：{err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let runtime = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("错误：创建异步运行时失败：{err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("正在解析目录：书源 {source_id} · {url}");
+    match runtime.block_on(service::fetch_book_catalog(
+        &http, catalog, cfg, source_id, url,
+    )) {
+        Ok(book_catalog) => {
+            println!(
+                "《{}》· {} · 共 {} 章",
+                book_catalog.book.name,
+                empty_dash(&book_catalog.book.author),
+                book_catalog.chapters.len()
+            );
+            let preview = book_catalog.chapters.iter().take(15);
+            for ch in preview {
+                println!("{:>4}. {}", ch.order, ch.title);
+            }
+            if book_catalog.chapters.len() > 15 {
+                println!("... 其余 {} 章省略", book_catalog.chapters.len() - 15);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("错误：解析目录失败：{err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_cli_search(cfg: &Config, catalog: &RuleCatalog, keyword: &str) -> ExitCode {

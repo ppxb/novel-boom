@@ -9,9 +9,11 @@ pub struct Book {
     pub category: String,
     pub cover_url: String,
     pub latest_chapter: String,
+    pub latest_chapter_url: String,
     pub last_update_time: String,
     pub status: String,
     /// Detail / catalog entry URL.
     pub url: String,
     pub source_id: u32,
+    pub source_name: String,
 }

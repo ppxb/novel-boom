@@ -44,6 +44,11 @@ pub fn select_first<'a>(document: &'a Html, query: &str) -> Result<Option<Elemen
     Ok(select_all_in_document(document, query)?.into_iter().next())
 }
 
+/// Extract a field from a document root using rule query semantics.
+pub fn extract_in_document(document: &Html, query: &str, base: &Url) -> String {
+    extract(document.root_element(), query, base)
+}
+
 /// Extract a field from an element using rule query semantics.
 pub fn extract(element: ElementRef<'_>, query: &str, base: &Url) -> String {
     if query.trim().is_empty() {
@@ -82,6 +87,7 @@ pub fn extract_content(element: ElementRef<'_>, kind: ContentKind, base: &Url) -
             .unwrap_or_default()
             .trim()
             .to_string(),
+        ContentKind::AttrValue => abs_url(element, "value", base),
     }
 }
 
