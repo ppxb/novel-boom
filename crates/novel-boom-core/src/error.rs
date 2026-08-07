@@ -21,6 +21,16 @@ pub enum Error {
     #[error("unsupported download format: {0}")]
     UnsupportedFormat(String),
 
+    #[error("rules file not found: {0}")]
+    RulesNotFound(PathBuf),
+
+    #[error("invalid rules at {path}: {source}")]
+    InvalidRules {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

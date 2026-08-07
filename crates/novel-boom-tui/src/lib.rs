@@ -1,14 +1,10 @@
-//! Terminal user interface for novel-boom.
+//! novel-boom 终端界面。
 //!
-//! Depends on [`novel_boom_core`] for configuration and (later) use-cases.
-//! This crate must not implement HTML parsing, HTTP crawling, or export logic.
+//! 仅负责展示与交互，依赖 [`novel_boom_core`] 提供的配置与书源数据。
+//! 本 crate 不实现 HTML 解析、HTTP 爬取或导出逻辑。
 
 mod app;
 mod screen;
+mod ui;
 
-use novel_boom_core::config::Config;
-
-/// Start the interactive TUI with an already-loaded configuration.
-pub fn run(config: Config) -> anyhow::Result<()> {
-    app::run(config)
-}
+pub use app::{TuiOptions, run};

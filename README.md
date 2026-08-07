@@ -65,11 +65,18 @@ Book sources remain **JSON** under `rules/` (compatible with so-novel rule packs
 | `[crawl] min-interval` | `[crawl] min_interval_ms` |
 | `[proxy] enabled/host/port` | `[proxy] enabled/host/port` |
 
-## TUI (current)
+## 终端界面（当前）
 
-- Home menu with keyboard navigation (`↑/↓` or `j/k`, `Enter`, `q`)
-- Read-only **Configuration** view (values loaded from TOML)
-- Placeholder entries for search / batch / sources (next milestones)
+界面文案为**中文**。
+
+- 主菜单：`↑/↓` 或 `j/k` 移动，`Enter` 确认，`q` 退出
+- **书源一览**：读取 `rules/` 下激活规则包，表格浏览
+- **配置信息**：只读展示 TOML 配置
+- 聚合搜索 / 独立搜索 / 批量下载：占位（后续里程碑）
+
+```bash
+cargo run -- --print-sources   # 命令行打印书源列表
+```
 
 ## Roadmap (short)
 

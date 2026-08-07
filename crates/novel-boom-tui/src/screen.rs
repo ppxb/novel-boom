@@ -1,12 +1,14 @@
-//! Top-level TUI screens (navigation states).
+//! 顶层界面状态。
 
-/// Which full-screen view is active.
+/// 当前全屏页面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    /// Main menu + overview.
+    /// 主菜单。
     Home,
-    /// Read-only configuration dump.
+    /// 只读配置。
     Config,
-    /// Reserved feature with a simple placeholder body.
+    /// 书源一览。
+    Sources,
+    /// 尚未实现的功能占位。
     Placeholder(&'static str),
 }

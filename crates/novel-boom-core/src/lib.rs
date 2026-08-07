@@ -5,6 +5,7 @@
 //!
 //! - [`config`] — TOML application settings
 //! - [`model`] — pure domain types
+//! - [`rule`] — book source packs (so-novel JSON)
 //! - [`Error`] / [`Result`]
 //!
 //! Crawl, parse, export, and use-case services will land in later milestones
@@ -13,6 +14,7 @@
 pub mod config;
 pub mod error;
 pub mod model;
+pub mod rule;
 
 pub use error::{Error, Result};
 
